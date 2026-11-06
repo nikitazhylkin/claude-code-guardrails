@@ -115,3 +115,88 @@ def test_extra_patterns_from_config(tmp_path):
 
 def test_non_bash_tool_and_garbage_input_pass(tmp_path):
     assert run_hook("deploy_guard.py", {"tool_name": "Edit", "tool_input": {}}).returncode == 0
+
+
+# Heredoc bodies are data, unless the command runs code.
+HEREDOC_DATA = [
+    "cat > README.md <<'EOF'\n## Deploy\nvercel --prod\nEOF",
+    "cat > README.md <<EOF\n## Deploy\nvercel --prod\nEOF",
+    'cat > README.md <<"EOF"\n## Deploy\nvercel --prod\nEOF',
+    "cat > README.md <<-EOF\n\t## Deploy\n\tvercel --prod\n\tEOF",
+    "cat > README.md << EOF\nvercel --prod\nEOF",
+    "cat > a.md <<'EOF'\nrailway up\nEOF",
+    "cat > a.md <<'EOF'\nshopify theme push --live\nEOF",
+    "cat > a.md <<'EOF'\ndon't forget\nvercel --prod\nEOF",
+    "cat <<A >a <<B >b\nvercel --prod\nA\nrailway up\nB",
+    "cat > a <<'X'\nvercel --prod\nX\ncat > b <<'Y'\nrailway up\nY",
+    "git commit -m \"$(cat <<'EOF'\nrun vercel --prod later\nEOF\n)\"",
+    "python3 -c 'print(1)\nvercel --prod'",
+]
+
+
+@pytest.mark.parametrize("cmd", HEREDOC_DATA)
+def test_heredoc_body_is_not_a_deploy(tmp_path, cmd):
+    r = deploy(tmp_path, cmd)
+    assert r.returncode == 0, r.stderr
+
+
+HEREDOC_STILL_DEPLOYS = [
+    "cat > a.md <<'EOF'\nx\nEOF\nvercel --prod",
+    "vercel --prod <<EOF\ny\nEOF",
+    "bash <<'EOF'\nvercel --prod\nEOF",
+    "cat <<EOF | sh\nrailway up\nEOF",
+    "ssh host <<EOF\nshopify theme push --live\nEOF",
+    'echo "a <<EOF"\nvercel --prod',
+    "cat <<< x\nvercel --prod",
+    "sudo bash <<EOF\nvercel --prod\nEOF",
+    "echo $((1<<2))\nvercel --prod\n2",
+    "(( x = 1<<2 ))\nvercel --prod\n2",
+    "# see <<EOF\nvercel --prod\nEOF",
+    "cat > x.sh <<'EOF'\nvercel --prod\nEOF\nbash x.sh",
+    "cat > x.sh <<'EOF'\nrailway up\nEOF\nchmod +x x.sh && ./x.sh",
+    "cat <<EOF\nvercel --prod",
+]
+
+
+@pytest.mark.parametrize("cmd", HEREDOC_STILL_DEPLOYS)
+def test_heredoc_lookalikes_and_executed_bodies_still_block(tmp_path, cmd):
+    r = deploy(tmp_path, cmd)
+    assert r.returncode == 2, cmd
+
+
+def test_extra_patterns_ignore_heredoc_data_but_catch_real_commands(tmp_path):
+    cfg = tmp_path / "g.json"
+    cfg.write_text(json.dumps({"deploy_guard": {"extra_patterns": [r"\bfly\s+deploy\b"]}}))
+    env = {"GUARDRAILS_CONFIG": str(cfg)}
+    assert deploy(tmp_path, "cat > a.md <<'EOF'\nfly deploy\nEOF", env_extra=env).returncode == 0
+    assert deploy(tmp_path, "cat > a.md <<'EOF'\nx\nEOF\nfly deploy", env_extra=env).returncode == 2
+
+
+def _load_hook():
+    import importlib.util
+    from conftest import HOOKS
+    spec = importlib.util.spec_from_file_location("deploy_guard_mod", HOOKS / "deploy_guard.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_scanner_drops_heredoc_body_and_quotes():
+    m = _load_hook()
+    out = m.strip_quotes("cat <<'EOF'\nvercel --prod\nEOF\nls")
+    assert "vercel" not in out and "ls" in out
+    assert "vercel" not in m.strip_quotes("echo 'a\nvercel --prod'")
+
+
+def test_scanner_keeps_bodies_when_command_runs_code():
+    m = _load_hook()
+    assert "railway up" in m.strip_quotes("cat <<EOF | bash\nrailway up\nEOF")
+    assert "railway up" not in m.strip_quotes("cat <<EOF | grep x\nrailway up\nEOF")
+    assert "railway up" in m.strip_quotes("cat > x <<EOF\nrailway up\nEOF\n./x")
+
+
+def test_scanner_judges_unterminated_body_comment_and_arithmetic():
+    m = _load_hook()
+    assert "vercel" in m.strip_quotes("cat <<EOF\nvercel --prod")
+    assert "<<EOF" in m.strip_quotes("# see <<EOF\nls")
+    assert "vercel" in m.strip_quotes("echo $((1<<2))\nvercel --prod\n2")

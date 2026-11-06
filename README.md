@@ -103,15 +103,15 @@ pip install pytest
 python3 -m pytest -q
 ```
 
-Last full run: 87 passed on Python 3.12.
+Last full run: 117 passed on Python 3.12.
 
-The suite has 87 tests. Each hook has at least one input that must block and one that must pass, run through the real script as a subprocess. The Stop hooks use JSONL transcript fixtures in `tests/fixtures/`. The deploy guard tests build real git repositories with a bare remote.
+The suite has 117 tests. Each hook has at least one input that must block and one that must pass, run through the real script as a subprocess. The Stop hooks use JSONL transcript fixtures in `tests/fixtures/`. The deploy guard tests build real git repositories with a bare remote.
 
 ## Known limits
 
 - These are pattern checks, not proof. A model can write a claim in words the patterns do not know. `claim_evidence.py` checks that a matching tool ran, not that it tested the right thing.
 - The patterns are English only.
-- `deploy_guard.py` reads the command text. A heredoc or a multi-line string that has a line starting with a deploy command (for example a `vercel` line with `--prod`) is read as a deploy, because the command is split on newlines. Quoted one-line spans are stripped, but heredoc bodies are not. Write such files with an editor tool, or use `GUARDRAILS_BYPASS=1`.
+- `deploy_guard.py` reads the command text with a small scanner, not a full shell parser. Quoted spans (also multi-line) and terminated heredoc bodies are treated as data. If the same command runs code (`bash`, `sh`, `ssh`, `eval`, `./script`, a `*.sh` file), the heredoc bodies are read as commands too, and so is a heredoc with no closing line. Shell tricks beyond this (for example a deploy built from variables) pass.
 - `deploy_guard.py` only knows the deploy commands listed in `docs/HOOKS.md` plus your `extra_patterns`. Other deploy tools pass.
 - `claim_evidence.py` reads test output across the whole turn. A failure line from one command can mark a "tests pass" claim as failing even when a different command passed.
 - The `tests_pass` evidence check is substring based: any tool call whose name or arguments contain a runner name (for example the word `jest` in a file path) counts as a test run.
