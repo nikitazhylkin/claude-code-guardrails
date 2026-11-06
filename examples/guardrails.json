@@ -1,0 +1,16 @@
+{
+  "claim_evidence": {
+    "extra_test_runners": ["make check", "tox"],
+    "extra_deploy_tokens": ["terraform apply"],
+    "extra_perf_tokens": ["wrk"]
+  },
+  "model_ladder": {
+    "expensive_models": ["opus", "fable"],
+    "no_implementation_models": ["fable"],
+    "cheap_model": "sonnet",
+    "override_marker": "why-expensive:"
+  },
+  "deploy_guard": {
+    "extra_patterns": ["\\bfly\\s+deploy\\b", "\\bnpm\\s+publish\\b"]
+  }
+}

@@ -1,0 +1,93 @@
+# claude-code-guardrails
+
+Five small hooks for [Claude Code](https://docs.claude.com/en/docs/claude-code/hooks) that stop an agent from saying things it has not checked, and from doing a few things it should not do without a look first.
+
+Each hook is one Python file with no dependencies beyond the standard library. They come from a set I run on my own agent work, rewritten here so they stand alone.
+
+The idea behind them: a rule written in a markdown file does not stop an agent that is tired or in a hurry. A hook that reads the transcript and exits with code 2 does.
+
+## What each hook stops
+
+| Hook | Event | Stops |
+|---|---|---|
+| `claim_evidence.py` | Stop | "All tests pass", "deploy verified", "3x faster", "no bugs found" with no matching tool run in the same turn. Also stops "tests pass" when the last test output shows failures. Also stops a test count that was copied from a subagent report and printed by no shell of your own. |
+| `served_artifact.py` | Stop | "It is live at https://..." without a fingerprint fetched from that URL (ETag, build id, bundle hash, a string only the new code has) and a negative control (the same check failing on the old build). A 200 and a screenshot are equally true of the old bytes. |
+| `negative_claim.py` | Stop | "X is not installed" when a tool result in the same turn was paginated or truncated. Also "there is no way to..." about the outside world with no search scope and no reason given. |
+| `model_ladder_gate.py` | PreToolUse (Agent) | A subagent dispatch that inherits the expensive chat model by accident, a reader or reviewer running on an expensive model, and an expensive model on an implementation task. |
+| `deploy_guard.py` | PreToolUse (Bash) | A production deploy (`vercel --prod`, `railway up`, `shopify theme push --live`) from a tree that is not a git repo, has no remote, has an unpushed HEAD, has modified tracked files, or has untracked files in the deployed path. |
+
+What the Stop hooks ignore on purpose:
+
+- Planning words ("make sure tests pass before you merge").
+- Quoted or backticked mentions of a claim phrase.
+- Markdown table cells (negative claims).
+- Local URLs such as `localhost` (served artifact).
+- Statements about the agent's own reach ("I have no way to write to disk here").
+
+## Example of a blocked turn
+
+The agent edits a file, never runs the suite, and ends its turn:
+
+```
+assistant: Fixed the parser. All tests pass now.
+```
+
+The Stop hook exits with code 2 and writes this to stderr, which Claude Code feeds back to the model:
+
+```
+[claim-evidence] BLOCKED: claimed "tests pass" with no matching tool run in this turn (tests_pass).
+Run the check now and report its real output, or take the claim back. Re-run any number a subagent gave you in your own shell before you repeat it. Justified exception: GUARDRAILS_BYPASS=1.
+```
+
+The model then runs `pytest`, reads the result, and either reports the real output or takes the claim back. The hook only forces one extra round: when Claude Code sets `stop_hook_active`, the hooks let the turn end, so there is no loop.
+
+## Install
+
+1. Copy the `hooks/` folder into your project, for example to `.claude/guardrails/`. Keep `_common.py` next to the hooks, because they all import it.
+2. Merge [`examples/settings.json`](examples/settings.json) into your `.claude/settings.json`. It wires the three Stop hooks, the Agent hook and the Bash hook. Use only the ones you want.
+3. Optional: copy [`examples/guardrails.json`](examples/guardrails.json) somewhere and set `GUARDRAILS_CONFIG` to its path.
+
+Tested on Python 3.12. Standard library only.
+
+## Settings
+
+All settings are optional.
+
+| Setting | Effect |
+|---|---|
+| `GUARDRAILS_BYPASS=1` | Turns every hook off for that run. |
+| `GUARDRAILS_CONFIG=/path/to/guardrails.json` | JSON file with per-hook options (see below). A missing or broken file means defaults. |
+| `GUARDRAILS_LOG_DIR=/path` | Writes one log file per hook there. No logging when unset. |
+| `CLAIM_EVIDENCE_MODE=warn` | Print the problem but do not block. Same for `SERVED_ARTIFACT_MODE`, `NEGATIVE_CLAIM_MODE`, `MODEL_LADDER_MODE`. Useful for a first week. |
+
+Config file sections:
+
+- `claim_evidence`: `extra_test_runners`, `extra_deploy_tokens`, `extra_perf_tokens` (lists of lowercase strings that count as evidence).
+- `model_ladder`: `expensive_models`, `no_implementation_models`, `cheap_model`, `override_marker`.
+- `deploy_guard`: `extra_patterns`, a list of regexes that mark more commands as production deploys.
+
+## How the Stop hooks decide
+
+Claude Code passes each hook a `transcript_path`. The hook reads the JSONL transcript and takes everything after the last real user message. Tool results and injected meta messages are also stored as `user` entries, and the hooks skip them, otherwise a turn that used tools would look like it used none.
+
+From that turn the hook builds three things: the assistant text, a signature for every tool call (name plus arguments), and the text of every tool result. A claim pattern in the text needs a matching token in the tool signatures. The hooks fail open: bad input, a missing transcript or an error in the hook itself returns 0.
+
+## Tests
+
+```
+pip install pytest
+python3 -m pytest
+```
+
+87 tests. Each hook has at least one input that must block and one that must pass, run through the real script as a subprocess. The Stop hooks use JSONL transcript fixtures in `tests/fixtures/`. The deploy guard tests build real git repositories with a bare remote.
+
+## Limits
+
+- These are pattern checks, not proof. A model can still write a claim in words the patterns do not know. They catch the common forms, and each new miss becomes a new pattern and a new test.
+- `claim_evidence.py` checks that a matching tool ran, not that it tested the right thing.
+- The patterns are English only.
+- The tests cover the hooks as scripts. I have not tested them against every Claude Code release, so check the hook input format if a new release changes it.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
