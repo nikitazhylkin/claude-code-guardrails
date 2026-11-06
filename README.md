@@ -13,7 +13,7 @@ The idea behind them: a rule written in a markdown file does not stop an agent t
 | `claim_evidence.py` | Stop | "All tests pass", "deploy verified", "3x faster", "no bugs found" with no matching tool run in the same turn. Also stops "tests pass" when the last test output shows failures. Also stops a test count that was copied from a subagent report and printed by no shell of your own. |
 | `served_artifact.py` | Stop | "It is live at https://..." without a fingerprint fetched from that URL (ETag, build id, bundle hash, a string only the new code has) and a negative control (the same check failing on the old build). A 200 and a screenshot are equally true of the old bytes. |
 | `negative_claim.py` | Stop | "X is not installed" when a tool result in the same turn was paginated or truncated. Also "there is no way to..." about the outside world with no search scope and no reason given. |
-| `model_ladder_gate.py` | PreToolUse (Agent) | A subagent dispatch that inherits the expensive chat model by accident, a reader or reviewer running on an expensive model, and an expensive model on an implementation task. |
+| `model_ladder_gate.py` | PreToolUse (Agent) | A subagent dispatch that inherits the expensive chat model by accident, a reader or reviewer running on an expensive model, and a model from the "no implementation" list (default `fable`) on an implementation prompt. |
 | `deploy_guard.py` | PreToolUse (Bash) | A production deploy (`vercel --prod`, `railway up`, `shopify theme push --live`) from a tree that is not a git repo, has no remote, has an unpushed HEAD, has modified tracked files, or has untracked files in the deployed path. |
 
 What the Stop hooks ignore on purpose:
@@ -47,7 +47,11 @@ The model then runs `pytest`, reads the result, and either reports the real outp
 2. Merge [`examples/settings.json`](examples/settings.json) into your `.claude/settings.json`. It wires the three Stop hooks, the Agent hook and the Bash hook. Use only the ones you want.
 3. Optional: copy [`examples/guardrails.json`](examples/guardrails.json) somewhere and set `GUARDRAILS_CONFIG` to its path.
 
-Tested on Python 3.12. Standard library only.
+## Requirements
+
+- Python 3 with the standard library only. The tests ran on Python 3.12 (Ubuntu). I also ran the hook scripts by hand on Python 3.14 (macOS). I have not run anything on older versions.
+- `git` on the PATH, for `deploy_guard.py` and its tests.
+- `pytest`, only to run the tests.
 
 ## Settings
 
@@ -70,16 +74,20 @@ Config file sections:
 
 Claude Code passes each hook a `transcript_path`. The hook reads the JSONL transcript and takes everything after the last real user message. Tool results and injected meta messages are also stored as `user` entries, and the hooks skip them, otherwise a turn that used tools would look like it used none.
 
-From that turn the hook builds three things: the assistant text, a signature for every tool call (name plus arguments), and the text of every tool result. A claim pattern in the text needs a matching token in the tool signatures. The hooks fail open: bad input, a missing transcript or an error in the hook itself returns 0.
+From that turn the hook builds three things: the assistant text, a signature for every tool call (name plus arguments), and the text of every tool result. A claim pattern in the text needs a matching token in the tool signatures. Bad input or a missing transcript returns 0 (allow). `model_ladder_gate.py` and `deploy_guard.py` also catch any error of their own and allow. The three Stop hooks do not wrap their whole body, so an unexpected bug there would exit with a non-zero code other than 2, which Claude Code treats as a non-blocking error and does not block the turn.
 
-## Tests
+## How to run the tests
+
+From the repository root:
 
 ```
 pip install pytest
-python3 -m pytest
+python3 -m pytest -q
 ```
 
-87 tests. Each hook has at least one input that must block and one that must pass, run through the real script as a subprocess. The Stop hooks use JSONL transcript fixtures in `tests/fixtures/`. The deploy guard tests build real git repositories with a bare remote.
+Last full run: 87 passed on Python 3.12.
+
+The suite has 87 tests. Each hook has at least one input that must block and one that must pass, run through the real script as a subprocess. The Stop hooks use JSONL transcript fixtures in `tests/fixtures/`. The deploy guard tests build real git repositories with a bare remote.
 
 ## Limits
 
