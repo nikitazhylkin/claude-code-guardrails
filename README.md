@@ -53,22 +53,40 @@ The model then runs `pytest`, reads the result, and either reports the real outp
 - `git` on the PATH, for `deploy_guard.py` and its tests.
 - `pytest`, only to run the tests.
 
-## Settings
+## Configuration reference
 
-All settings are optional.
+Everything is optional. Defaults apply when a setting is absent.
 
-| Setting | Effect |
-|---|---|
-| `GUARDRAILS_BYPASS=1` | Turns every hook off for that run. |
-| `GUARDRAILS_CONFIG=/path/to/guardrails.json` | JSON file with per-hook options (see below). A missing or broken file means defaults. |
-| `GUARDRAILS_LOG_DIR=/path` | Writes one log file per hook there. No logging when unset. |
-| `CLAIM_EVIDENCE_MODE=warn` | Print the problem but do not block. Same for `SERVED_ARTIFACT_MODE`, `NEGATIVE_CLAIM_MODE`, `MODEL_LADDER_MODE`. Useful for a first week. |
+Environment variables:
 
-Config file sections:
+| Variable | Used by | Default | Effect |
+|---|---|---|---|
+| `GUARDRAILS_BYPASS` | all hooks | unset | Set to exactly `1` and the hook exits 0 without checking. |
+| `GUARDRAILS_CONFIG` | all hooks | unset | Path to a JSON config file (keys below). A missing, unreadable or invalid file means defaults. |
+| `GUARDRAILS_LOG_DIR` | all hooks | unset (no logging) | Directory for one log file per hook. |
+| `CLAIM_EVIDENCE_MODE` | `claim_evidence.py` | `block` | Any other value prints a WARN line and allows. |
+| `SERVED_ARTIFACT_MODE` | `served_artifact.py` | `block` | Same. |
+| `NEGATIVE_CLAIM_MODE` | `negative_claim.py` | `block` | Same. |
+| `MODEL_LADDER_MODE` | `model_ladder_gate.py` | `block` | Same. |
 
-- `claim_evidence`: `extra_test_runners`, `extra_deploy_tokens`, `extra_perf_tokens` (lists of lowercase strings that count as evidence).
-- `model_ladder`: `expensive_models`, `no_implementation_models`, `cheap_model`, `override_marker`.
-- `deploy_guard`: `extra_patterns`, a list of regexes that mark more commands as production deploys.
+`deploy_guard.py` has no warn mode.
+
+JSON config keys:
+
+| Section | Key | Default | Effect |
+|---|---|---|---|
+| `claim_evidence` | `extra_test_runners` | `[]` | Extra lowercase strings that count as a test run. They also count for "no bugs found". |
+| `claim_evidence` | `extra_deploy_tokens` | `[]` | Extra strings that count as deploy evidence. |
+| `claim_evidence` | `extra_perf_tokens` | `[]` | Extra strings that count as a timing or benchmark run. |
+| `model_ladder` | `expensive_models` | `["opus", "fable"]` | Substrings (case-insensitive) of model names treated as expensive for readers and reviewers. |
+| `model_ladder` | `no_implementation_models` | `["fable"]` | Substrings of model names that must not get an implementation prompt. |
+| `model_ladder` | `cheap_model` | `"sonnet"` | Name shown in the block message. |
+| `model_ladder` | `override_marker` | `"why-expensive:"` | A prompt line starting with this text, followed by a reason, keeps an expensive reader or reviewer. |
+| `deploy_guard` | `extra_patterns` | `[]` | Regexes. A command segment that matches one is treated as a production deploy. Invalid regexes are skipped. |
+
+Exit codes: `0` allows, `2` blocks (stderr goes back to the model). The Stop hooks always allow when Claude Code sets `stop_hook_active`, so a block costs at most one extra round.
+
+For the full behaviour of each hook see [docs/HOOKS.md](docs/HOOKS.md).
 
 ## How the Stop hooks decide
 
@@ -89,12 +107,16 @@ Last full run: 87 passed on Python 3.12.
 
 The suite has 87 tests. Each hook has at least one input that must block and one that must pass, run through the real script as a subprocess. The Stop hooks use JSONL transcript fixtures in `tests/fixtures/`. The deploy guard tests build real git repositories with a bare remote.
 
-## Limits
+## Known limits
 
-- These are pattern checks, not proof. A model can still write a claim in words the patterns do not know. They catch the common forms, and each new miss becomes a new pattern and a new test.
-- `claim_evidence.py` checks that a matching tool ran, not that it tested the right thing.
+- These are pattern checks, not proof. A model can write a claim in words the patterns do not know. `claim_evidence.py` checks that a matching tool ran, not that it tested the right thing.
 - The patterns are English only.
-- The tests cover the hooks as scripts. I have not tested them against every Claude Code release, so check the hook input format if a new release changes it.
+- `deploy_guard.py` reads the command text. A heredoc or a multi-line string that has a line starting with a deploy command (for example a `vercel` line with `--prod`) is read as a deploy, because the command is split on newlines. Quoted one-line spans are stripped, but heredoc bodies are not. Write such files with an editor tool, or use `GUARDRAILS_BYPASS=1`.
+- `deploy_guard.py` only knows the deploy commands listed in `docs/HOOKS.md` plus your `extra_patterns`. Other deploy tools pass.
+- `claim_evidence.py` reads test output across the whole turn. A failure line from one command can mark a "tests pass" claim as failing even when a different command passed.
+- The `tests_pass` evidence check is substring based: any tool call whose name or arguments contain a runner name (for example the word `jest` in a file path) counts as a test run.
+- `negative_claim.py` treats any pagination marker in any tool result of the turn as partial data, even if it came from a different call than the one the claim is about.
+- The hooks have not been tested against every Claude Code release. If a release changes the hook input or transcript format, check `_common.py`.
 
 ## License
 
