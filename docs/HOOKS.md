@@ -113,7 +113,7 @@ A dispatch is a reader or reviewer when: a prompt line `Role: ...` names a revie
 - `shopify theme publish`
 - any command segment that matches a regex in `extra_patterns`
 
-The command is cut into segments at `&&`, `||`, `;`, `|` and newlines. Quoted one-line spans are removed first. A segment whose first word is `grep`, `rg`, `ripgrep`, `ack`, `echo` or `cat` is not a deploy.
+The command is cut into segments at `&&`, `||`, `;`, `|` and newlines. Quoted spans and heredoc bodies that have a closing line are removed first, unless the command also runs code (`bash`, `sh`, `ssh`, `eval`, `./script`, a `*.sh` file) or has no closing line; then the body is read as commands. A `#` comment is read as written, and `<<` inside `(( ))` arithmetic is not a heredoc. A segment whose first word is `grep`, `rg`, `ripgrep`, `ack`, `echo` or `cat` is not a deploy.
 
 **Deploy directory:** the value of `--cwd` or `--path` on the command, otherwise the payload `cwd`.
 
@@ -144,6 +144,6 @@ All failures are listed in one message.
   Override: GUARDRAILS_BYPASS=1 (the deploy then cannot be reviewed later).
 ```
 
-**Known false positive:** a heredoc or multi-line string with a line that starts a deploy command is read as a deploy, because heredoc bodies are not stripped.
+**Heredocs:** a deploy command written inside a heredoc or multi-line string is data and is ignored, as long as nothing in the same command runs code.
 
 **Bypass:** `GUARDRAILS_BYPASS=1`.
