@@ -7,7 +7,10 @@ commit. This hook looks at the command, and if it is a real production deploy, i
 the git state of the deploy directory first.
 
 Deploy commands matched (real invocations only, quoted spans are stripped, and a segment
-that starts with grep/rg/echo/cat is not a deploy):
+that starts with grep/rg/echo/cat is not a deploy). Terminated heredoc bodies are data and
+are not judged, unless the command runs code anywhere (bash, sh, ssh, eval, ./script, *.sh),
+in which case the bodies are judged too. An unterminated body is judged. `#` comments are
+judged verbatim; `<<` inside (( )) arithmetic is not a heredoc:
   "vercel" with --prod        "railway up"        "shopify theme push" with --live
   "shopify theme publish"     plus any regex in the config key "extra_patterns"
 
@@ -38,9 +41,160 @@ import _common as c  # noqa: E402
 HOOK = "deploy_guard"
 MAX_PATHS = 10
 READER_COMMANDS = {"grep", "rg", "echo", "cat", "ripgrep", "ack"}
-QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 # Cut the command into segments first: `echo hi && <deploy>` is a deploy, not an echo.
 SEGMENT_RE = re.compile(r"&&|\|\||;|\||\n")
+
+
+
+
+SHELL_RUNNERS = {"bash", "sh", "zsh", "dash", "ksh", "ssh", "eval", "source", "."}
+_HEREDOC_WORD_END = set(" \t\n;&|<>()`")
+
+
+def _first_word(segment: str) -> str | None:
+    for w in segment.split():
+        if w in ("sudo", "env") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+            continue
+        return w
+    return None
+
+
+def _runs_code(text: str) -> bool:
+    """True when any segment hands code to a shell/remote runner or runs a script file
+    (first word is a runner, starts with ./ or /, or ends with .sh)."""
+    for seg in SEGMENT_RE.split(text):
+        w = _first_word(seg)
+        if w and (w in SHELL_RUNNERS or w.startswith(("./", "/")) or w.endswith(".sh")):
+            return True
+    return False
+
+
+def _read_heredoc_delim(s: str, i: int) -> tuple[str, bool, int] | None:
+    """Parse the delimiter after `<<` at s[i:]. Returns (delimiter, strip_tabs, next index) or None."""
+    n = len(s)
+    strip_tabs = False
+    if i < n and s[i] == "-":
+        strip_tabs = True
+        i += 1
+    while i < n and s[i] in " \t":
+        i += 1
+    if i >= n:
+        return None
+    if s[i] in "'\"":
+        q = s[i]
+        j = s.find(q, i + 1)
+        if j == -1:
+            return None
+        return s[i + 1:j], strip_tabs, j + 1
+    j = i
+    while j < n and s[j] not in _HEREDOC_WORD_END:
+        j += 1
+    if j == i:
+        return None
+    return s[i:j], strip_tabs, j
+
+
+def strip_quotes(command: str) -> str:
+    """Return the command text to judge: quoted spans dropped (replaced by a space) and
+    terminated heredoc bodies dropped. If anything in the command runs code (a shell/remote
+    runner, a script path, a pipe into a shell), the heredoc bodies are kept and judged too."""
+    text = _scan(command, keep_bodies=False)
+    if _runs_code(text):
+        return _scan(command, keep_bodies=True)
+    return text
+
+
+def _matching_arith_end(s: str, i: int) -> int:
+    """s[i:i+2] == '((' : index just past the matching '))', or -1."""
+    depth = 0
+    j = i
+    n = len(s)
+    while j < n:
+        if s[j] == "(":
+            depth += 1
+        elif s[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return -1
+
+
+def _scan(command: str, keep_bodies: bool) -> str:
+    s = command
+    n = len(s)
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    i = 0
+    while i < n:
+        c = s[i]
+        if c == "\\":
+            out.append(s[i:i + 2])
+            i += 2
+        elif c == "'":
+            j = s.find("'", i + 1)
+            if j == -1:  # unterminated: keep judging the rest
+                out.append(s[i:])
+                break
+            out.append(" ")
+            i = j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            if j >= n:
+                out.append(s[i:])
+                break
+            out.append(" ")
+            i = j + 1
+        elif c == "#" and (i == 0 or s[i - 1] in " \t\n;&|("):
+            j = s.find("\n", i)
+            j = n if j == -1 else j
+            out.append(s[i:j])
+            i = j
+        elif s.startswith("((", i):
+            j = _matching_arith_end(s, i)
+            if j == -1:
+                out.append("((")
+                i += 2
+            else:
+                out.append(s[i:j])
+                i = j
+        elif s.startswith("<<<", i):
+            out.append("<<<")
+            i += 3
+        elif s.startswith("<<", i):
+            parsed = _read_heredoc_delim(s, i + 2)
+            if parsed is None:
+                out.append("<<")
+                i += 2
+            else:
+                delim, strip_tabs, i = parsed
+                pending.append((delim, strip_tabs))
+                out.append(" ")
+        elif c == "\n" and pending:
+            out.append("\n")
+            i += 1
+            for delim, strip_tabs in pending:
+                body: list[str] = []
+                terminated = False
+                while i < n:
+                    j = s.find("\n", i)
+                    line = s[i:] if j == -1 else s[i:j]
+                    i = n if j == -1 else j + 1
+                    cand = line.lstrip("\t") if strip_tabs else line
+                    if cand == delim or line.strip() == delim:
+                        terminated = True
+                        break
+                    body.append(line + "\n")
+                # Dropped only when the terminator was found; an unterminated body is judged.
+                if keep_bodies or not terminated:
+                    out.extend(body)
+            pending = []
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
 
 
 def segment_kind(segment: str, extra: list[re.Pattern]) -> str | None:
@@ -62,7 +216,7 @@ def segment_kind(segment: str, extra: list[re.Pattern]) -> str | None:
 
 
 def deploy_kind(command: str, extra: list[re.Pattern] | None = None) -> str | None:
-    stripped = QUOTED_SPAN_RE.sub(" ", command)
+    stripped = strip_quotes(command)
     for segment in SEGMENT_RE.split(stripped):
         kind = segment_kind(segment, extra or [])
         if kind:
